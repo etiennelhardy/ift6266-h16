@@ -1,0 +1,75 @@
+class MinMaxImageDimensions(SourcewiseTransformer, ExpectsAxisLabels):
+    """Resize (lists of) images to minimum dimensions.
+
+    Parameters
+    ----------
+    data_stream : instance of :class:`AbstractDataStream`
+        The data stream to wrap.
+    minimum_shape : 2-tuple
+        The minimum `(height, width)` dimensions every image must have.
+        Images whose height and width are larger than these dimensions
+        are passed through as-is.
+    resample : str, optional
+        Resampling filter for PIL to use to upsample any images requiring
+        it. Options include 'nearest' (default), 'bilinear', and 'bicubic'.
+        See the PIL documentation for more detailed information.
+
+    Notes
+    -----
+    This transformer expects stream sources returning individual images,
+    represented as 2- or 3-dimensional arrays, or lists of the same.
+    The format of the stream is unaltered.
+
+    """
+    def __init__(self, data_stream, minimum_shape, resample='nearest',
+                 **kwargs):
+        self.minimum_shape = minimum_shape
+        try:
+            self.resample = getattr(Image, resample.upper())
+        except AttributeError:
+            raise ValueError("unknown resampling filter '{}'".format(resample))
+        kwargs.setdefault('produces_examples', data_stream.produces_examples)
+        kwargs.setdefault('axis_labels', data_stream.axis_labels)
+        super(MinMaxImageDimensions, self).__init__(data_stream, **kwargs)
+
+    def transform_source_batch(self, batch, source_name):
+        self.verify_axis_labels(('batch', 'channel', 'height', 'width'),
+                                self.data_stream.axis_labels[source_name],
+                                source_name)
+        return [self._example_transform(im, source_name) for im in batch]
+
+    def transform_source_example(self, example, source_name):
+        self.verify_axis_labels(('channel', 'height', 'width'),
+                                self.data_stream.axis_labels[source_name],
+                                source_name)
+        return self._example_transform(example, source_name)
+
+    def _example_transform(self, example, _):
+        if example.ndim > 3 or example.ndim < 2:
+            raise NotImplementedError
+        min_side = self.minimum_shape
+        original_height, original_width = example.shape[-2:]
+        original_min = min(example.shape[-2:])
+        dt = example.dtype
+        # If we're dealing with a colour image, swap around the axes
+        # to be in the format that PIL needs.
+        if example.ndim == 3:
+            im = example.transpose(1, 2, 0)
+        else:
+            im = example
+        if numpy.amax(im)<=1:
+            im *= 254
+            im = im.astype('uint8')
+        im = Image.fromarray(im)
+        width, height = im.size
+        multiplier = min_side/original_min
+        width = int(math.ceil(width * multiplier))
+        height = int(math.ceil(height * multiplier))
+        im = numpy.array(im.resize((width, height))).astype(dt)
+        im /= 254
+        # If necessary, undo the axis swap from earlier.
+        if im.ndim == 3:
+            example = im.transpose(2, 0, 1)
+        else:
+            example = im
+        return example
